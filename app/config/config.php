@@ -264,10 +264,10 @@ $config['session_hmac_secret']     = getenv('APP_KEY') ?: '';
 $config['cookie_prefix']           = '';
 $config['cookie_domain']           = '';
 $config['cookie_path']             = '/';
-$config['cookie_secure']           = FALSE;
+$config['cookie_secure']           = strtolower((string) getenv('APP_ENV')) === 'production';
 $config['cookie_expiration']       = 86400;
-$config['cookie_httponly']         = FALSE;
-$config['cookie_samesite']         = 'Strict';
+$config['cookie_httponly']         = TRUE;
+$config['cookie_samesite']         = strtolower((string) getenv('APP_ENV')) === 'production' ? 'None' : 'Strict';
 
 /*
 |--------------------------------------------------------------------------
@@ -401,12 +401,21 @@ $config['security_headers'] = [
     // ── API ──
     'api_max_body' => 1048576,
     'cors' => [
-        'allowed_origins' => getenv('APP_FRONTEND_URL') ? [rtrim(getenv('APP_FRONTEND_URL'), '/')] : [],
+        'allowed_origins' => array_values(array_unique(array_filter(array_map(
+            function ($origin) {
+                return rtrim(trim((string) $origin), '/');
+            },
+            array_merge(
+                explode(',', (string) (getenv('APP_FRONTEND_URL') ?: '')),
+                ['https://gymmate-frontend-vfen.onrender.com']
+            )
+        )))),
         'credentials'     => true,
         'methods'         => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
         'headers'         => 'Authorization, Content-Type, X-Requested-With',
         'max_age'         => 600,
     ],
+    'trust_proxy' => strtolower((string) getenv('APP_ENV')) === 'production',
 
     // ── Other ──
     'frame_ancestors' => "'none'",

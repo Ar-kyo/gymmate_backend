@@ -208,7 +208,7 @@ class Security
 
 		setcookie($this->_csrf_cookie_name,
 			$this->_csrf_hash,
-			array('samesite' => 'Strict',
+			array('samesite' => config_item('cookie_samesite') ?: 'Strict',
 			'secure'   => $secure,
 			'expires'  => $expiration,
 			'path'     => config_item('cookie_path'),
