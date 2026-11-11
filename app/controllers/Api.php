@@ -44,7 +44,11 @@ class Api extends Controller
                 ),
             ], $database['schema_ready'] ? 200 : 503);
         } catch (Throwable $exception) {
-            error_log('[GymMate health] Database check failed.');
+            error_log(sprintf(
+                '[GymMate health] Database check failed (%s): %s',
+                get_class($exception),
+                $exception->getMessage()
+            ));
             $this->respond([
                 'status' => 'database_unavailable',
                 'database' => ['connected' => false],
