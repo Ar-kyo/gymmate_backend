@@ -235,17 +235,11 @@ class Api extends Controller
             error_log('[GymMate pass] APP_KEY must contain at least 32 characters.');
             $this->respond(['error' => 'The secure membership pass is not configured. Please contact the administrator.'], 503);
         }
-        $expiresAt = min(strtotime($membership['end_date'] . ' 23:59:59'), time() + 300);
-        $payload = rtrim(strtr(base64_encode(json_encode([
-            'type' => 'gymmate-pass',
-            'user_id' => (int) $member['user_id'],
-            'membership_id' => (int) $membership['membership_id'],
-            'expires_at' => $expiresAt,
-        ])), '+/', '-_'), '=');
+        $userId = (int) $member['user_id'];
+        $payload = 'gm1.' . $userId;
         $signature = rtrim(strtr(base64_encode(hash_hmac('sha256', $payload, $secret, true)), '+/', '-_'), '=');
         $this->respond([
             'token' => $payload . '.' . $signature,
-            'expires_at' => date(DATE_ATOM, $expiresAt),
             'membership' => $membership,
         ]);
     }
@@ -428,38 +422,38 @@ class Api extends Controller
             $this->respond(['error' => 'Only a trainer or administrator can scan membership passes.'], 403);
         }
         $token = trim((string) ($_POST['token'] ?? ''));
-        if (strlen($token) > 2048 || substr_count($token, '.') !== 1) {
-            $this->respond(['error' => 'The membership QR code is invalid or expired.'], 422);
-        }
-        [$payload, $providedSignature] = explode('.', $token, 2);
-        $secret = (string) getenv('APP_KEY');
-        $expectedSignature = rtrim(strtr(base64_encode(hash_hmac('sha256', $payload, $secret, true)), '+/', '-_'), '=');
-        if ($secret === '' || !hash_equals($expectedSignature, $providedSignature)) {
-            $this->respond(['error' => 'The membership QR code is invalid or expired.'], 422);
-        }
-        $encodedPayload = strtr($payload, '-_', '+/');
-        $encodedPayload .= str_repeat('=', (4 - strlen($encodedPayload) % 4) % 4);
-        $decoded = base64_decode($encodedPayload, true);
-        $pass = $decoded === false ? null : json_decode($decoded, true);
+        $parts = explode('.', $token);
         if (
-            !is_array($pass) || ($pass['type'] ?? '') !== 'gymmate-pass'
-            || !isset($pass['user_id'], $pass['membership_id'], $pass['expires_at'])
-            || !is_int($pass['user_id']) || !is_int($pass['membership_id'])
-            || !is_int($pass['expires_at']) || $pass['expires_at'] < time()
-            || $pass['expires_at'] > time() + 360
+            strlen($token) > 128 || count($parts) !== 3 || $parts[0] !== 'gm1'
+            || !ctype_digit($parts[1]) || (int) $parts[1] < 1 || strlen($parts[2]) !== 43
         ) {
-            $this->respond(['error' => 'The membership QR code is invalid or expired. Ask the member to refresh their pass.'], 422);
+            $this->respond(['error' => 'The membership QR code is invalid.'], 422);
         }
+        $secret = (string) getenv('APP_KEY');
+        if (strlen($secret) < 32) {
+            error_log('[GymMate pass] APP_KEY must contain at least 32 characters.');
+            $this->respond(['error' => 'The secure membership pass is not configured. Please contact the administrator.'], 503);
+        }
+        $payload = $parts[0] . '.' . $parts[1];
+        $expectedSignature = rtrim(strtr(base64_encode(hash_hmac('sha256', $payload, $secret, true)), '+/', '-_'), '=');
+        if (!hash_equals($expectedSignature, $parts[2])) {
+            $this->respond(['error' => 'The membership QR code is invalid.'], 422);
+        }
+        $userId = (int) $parts[1];
         $this->call->model('Gymmate_model');
+        $membership = $this->Gymmate_model->find_active_member_pass($userId);
+        if (!$membership) {
+            $this->respond(['error' => 'This member does not have a currently active membership.'], 409);
+        }
         $logId = $this->Gymmate_model->record_attendance(
-            (int) $pass['user_id'],
-            (int) $pass['membership_id'],
+            $userId,
+            (int) $membership['membership_id'],
             (int) $scanner['user_id'],
             $scanner['role'],
             'GymMate'
         );
         if (!$logId) {
-            $this->respond(['error' => 'This pass does not have a currently active membership.'], 409);
+            $this->respond(['error' => 'This member does not have a currently active membership.'], 409);
         }
         $this->respond(['message' => 'Member checked in successfully.', 'attendance_id' => $logId]);
     }
