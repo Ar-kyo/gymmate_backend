@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+vendor
+frontend
+runtime/*
+!runtime/.htaccess
+!runtime/index.html
+node_modules
+*.log
