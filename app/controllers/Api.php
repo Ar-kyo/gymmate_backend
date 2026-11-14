@@ -36,12 +36,7 @@ class Api extends Controller
                 'status' => $database['schema_ready'] ? 'ok' : 'setup_required',
                 'database' => $database,
                 'gcash_payment_configured' => $this->PayMongo->is_configured(),
-                'email_configured' => (bool) (
-                    getenv('SMTP_HOST')
-                    && getenv('SMTP_USER')
-                    && getenv('SMTP_PASSWORD')
-                    && getenv('MAIL_FROM_ADDRESS')
-                ),
+                'email_configured' => (bool) (getenv('RESEND_API_KEY') && getenv('MAIL_FROM_ADDRESS')),
             ], $database['schema_ready'] ? 200 : 503);
         } catch (Throwable $exception) {
             error_log(sprintf(
@@ -52,12 +47,7 @@ class Api extends Controller
             $this->respond([
                 'status' => 'database_unavailable',
                 'database' => ['connected' => false],
-                'email_configured' => (bool) (
-                    getenv('SMTP_HOST')
-                    && getenv('SMTP_USER')
-                    && getenv('SMTP_PASSWORD')
-                    && getenv('MAIL_FROM_ADDRESS')
-                ),
+                'email_configured' => (bool) (getenv('RESEND_API_KEY') && getenv('MAIL_FROM_ADDRESS')),
             ], 503);
         }
     }
@@ -901,6 +891,7 @@ class Api extends Controller
 
         $message = implode(' <- ', $details);
         $secrets = [
+            (string) getenv('RESEND_API_KEY'),
             (string) getenv('SMTP_PASSWORD'),
             (string) getenv('SMTP_USER'),
             (string) getenv('MAIL_FROM_ADDRESS'),

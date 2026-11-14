@@ -8,6 +8,20 @@
 
 ---
 
+## Email delivery
+
+The welcome and contact emails use the Resend HTTPS API. Configure these environment variables locally and on Render:
+
+```env
+RESEND_API_KEY=re_...
+MAIL_FROM_ADDRESS=notifications@your-verified-domain.com
+MAIL_FROM_NAME=GymMate
+```
+
+Verify the sender domain in Resend before sending. Do not commit the API key. The contact form replies to the sender's email address; messages are delivered to the administrator email configured in GymMate.
+
+---
+
 ## Overview
 
 **LavaLust** is an open-source PHP framework that follows the **MVC (Model–View–Controller)** architectural pattern. It is designed for developers who need a structured, maintainable, and scalable foundation — without the bloat of heavier modern frameworks.
