@@ -147,7 +147,7 @@ class Api extends Controller
                 $email
             );
         } catch (Throwable $exception) {
-            error_log('[GymMate mail] Welcome email delivery failed.');
+            $this->log_mail_failure('Welcome email', $exception);
         }
 
         $this->respond([
@@ -484,11 +484,11 @@ class Api extends Controller
         try {
             $this->call->library('GymmateMailer');
             if (!$this->GymmateMailer->send_contact($adminEmail, $name, $email, $message)) {
-                error_log('[GymMate mail] Contact message delivery failed.');
+                error_log('[GymMate mail] Contact message delivery returned false.');
                 $this->respond(['error' => 'Your message could not be sent right now. Please try again later.'], 503);
             }
         } catch (Throwable $exception) {
-            error_log('[GymMate mail] Contact message delivery failed.');
+            $this->log_mail_failure('Contact message', $exception);
             $this->respond(['error' => 'Your message could not be sent right now. Please try again later.'], 503);
         }
         $this->session->set_userdata('contact_last_sent', time());
@@ -890,6 +890,30 @@ class Api extends Controller
         $today = new DateTime('today');
         $latest = (clone $today)->modify('+90 days');
         return $parsed >= $today && $parsed <= $latest;
+    }
+
+    private function log_mail_failure(string $operation, Throwable $exception)
+    {
+        $details = [];
+        for ($current = $exception; $current && count($details) < 3; $current = $current->getPrevious()) {
+            $details[] = get_class($current) . ': ' . $current->getMessage();
+        }
+
+        $message = implode(' <- ', $details);
+        $secrets = [
+            (string) getenv('SMTP_PASSWORD'),
+            (string) getenv('SMTP_USER'),
+            (string) getenv('MAIL_FROM_ADDRESS'),
+        ];
+        foreach ($secrets as $secret) {
+            if ($secret !== '') {
+                $message = str_ireplace($secret, '[redacted]', $message);
+            }
+        }
+        $message = preg_replace('/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i', '[email]', $message);
+        $message = substr(preg_replace('/[\r\n\t]+/', ' ', (string) $message), 0, 500);
+
+        error_log(sprintf('[GymMate mail] %s delivery failed: %s', $operation, $message));
     }
 
     private function respond(array $payload, $status = 200)

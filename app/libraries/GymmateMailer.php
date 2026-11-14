@@ -12,6 +12,9 @@ class GymmateMailer
         $port = (int) (getenv('SMTP_PORT') ?: 587);
         $username = (string) getenv('SMTP_USER');
         $password = (string) getenv('SMTP_PASSWORD');
+        if (strcasecmp($host, 'smtp.gmail.com') === 0) {
+            $password = preg_replace('/\s+/', '', $password);
+        }
         $encryption = strtolower(trim((string) (getenv('SMTP_ENCRYPTION') ?: 'tls')));
         $fromAddress = trim((string) getenv('MAIL_FROM_ADDRESS'));
         $fromName = trim((string) (getenv('MAIL_FROM_NAME') ?: 'GymMate'));
