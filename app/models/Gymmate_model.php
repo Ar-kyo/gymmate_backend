@@ -116,11 +116,20 @@ class Gymmate_model extends Model
         $statement->execute($requiredTables);
         $installedTables = $statement->fetchAll(PDO::FETCH_COLUMN);
         $missingTables = array_values(array_diff($requiredTables, $installedTables));
+        $requiredPaymentColumns = ['payer_reference', 'proof_image_path', 'proof_submitted_at'];
+        $columnStatement = $pdo->prepare(
+            'SELECT column_name FROM information_schema.columns
+             WHERE table_schema = DATABASE() AND table_name = ?'
+        );
+        $columnStatement->execute(['membership_payments']);
+        $paymentColumns = $columnStatement->fetchAll(PDO::FETCH_COLUMN);
+        $missingPaymentColumns = array_values(array_diff($requiredPaymentColumns, $paymentColumns));
 
         return [
             'connected' => true,
-            'schema_ready' => count($missingTables) === 0,
+            'schema_ready' => count($missingTables) === 0 && count($missingPaymentColumns) === 0,
             'missing_tables' => $missingTables,
+            'missing_membership_payment_columns' => $missingPaymentColumns,
         ];
     }
 
@@ -210,7 +219,8 @@ class Gymmate_model extends Model
         return $this->rows(
             'SELECT m.membership_id, m.start_date, m.end_date, m.status, m.created_at,
                     p.plan_name, p.duration_months, p.price,
-                    mp.payment_method, mp.payment_status, mp.reference_number
+                    mp.payment_id, mp.payment_method, mp.payment_status, mp.reference_number,
+                    mp.payer_reference, (mp.proof_image_path IS NOT NULL) AS proof_submitted
              FROM memberships m
              INNER JOIN membership_plans p ON p.plan_id = m.plan_id
              LEFT JOIN membership_payments mp ON mp.membership_id = m.membership_id
@@ -631,8 +641,47 @@ class Gymmate_model extends Model
                 'reference_number' => $reference !== '' ? $reference : null,
                 'payment_status' => 'Pending',
             ]);
+            $paymentId = (int) $db->last_id();
+            if ($paymentId < 1) {
+                throw new RuntimeException('The membership payment could not be created.');
+            }
             $db->commit();
-            return $membershipId;
+            return ['membership_id' => $membershipId, 'payment_id' => $paymentId];
+        } catch (Throwable $exception) {
+            $db->rollback();
+            throw $exception;
+        }
+    }
+
+    public function submit_gcash_payment_proof($paymentId, $userId, $payerReference, $proofImagePath)
+    {
+        $db = $this->connection();
+        $db->transaction();
+        try {
+            $payment = $this->row(
+                'SELECT mp.payment_status, mp.payment_method, mp.reference_number, mp.proof_image_path
+                 FROM membership_payments mp
+                 INNER JOIN memberships m ON m.membership_id = mp.membership_id
+                 WHERE mp.payment_id = ? AND m.user_id = ? FOR UPDATE',
+                [$paymentId, $userId]
+            );
+            if (
+                !$payment || $payment['payment_method'] !== 'GCash'
+                || strpos((string) $payment['reference_number'], 'GQ-') !== 0
+                || $payment['payment_status'] !== 'Pending'
+            ) {
+                $db->rollback();
+                return false;
+            }
+
+            $db->raw(
+                'UPDATE membership_payments
+                 SET payer_reference = ?, proof_image_path = ?, proof_submitted_at = NOW()
+                 WHERE payment_id = ?',
+                [$payerReference, $proofImagePath, $paymentId]
+            );
+            $db->commit();
+            return $payment['proof_image_path'] ?: '';
         } catch (Throwable $exception) {
             $db->rollback();
             throw $exception;
@@ -898,7 +947,9 @@ class Gymmate_model extends Model
     {
         return $this->rows(
             'SELECT mp.payment_id, mp.membership_id, mp.amount, mp.payment_method,
-                    mp.reference_number, mp.payment_status, mp.verified_at, mp.paid_at,
+                    mp.reference_number, mp.payer_reference, mp.proof_submitted_at,
+                    (mp.proof_image_path IS NOT NULL) AS proof_available,
+                    mp.payment_status, mp.verified_at, mp.paid_at,
                     m.status AS membership_status, m.start_date, m.end_date,
                     p.plan_name, u.full_name, u.email
              FROM membership_payments mp
@@ -979,7 +1030,8 @@ class Gymmate_model extends Model
         try {
             $payment = $this->row(
                 'SELECT mp.membership_id, mp.payment_status, mp.payment_method,
-                        mp.reference_number, m.user_id
+                        mp.reference_number, mp.payer_reference, mp.proof_image_path,
+                        m.user_id, m.status AS membership_status
                  FROM membership_payments mp
                  INNER JOIN memberships m ON m.membership_id = mp.membership_id
                  WHERE mp.payment_id = ? FOR UPDATE',
@@ -987,9 +1039,16 @@ class Gymmate_model extends Model
             );
             if (
                 !$payment || $payment['payment_status'] !== 'Pending'
+                || $payment['membership_status'] !== 'pending'
                 || (
                     $payment['payment_method'] === 'GCash'
                     && strpos((string) $payment['reference_number'], 'GM-') === 0
+                )
+                || (
+                    $status === 'Verified'
+                    && $payment['payment_method'] === 'GCash'
+                    && strpos((string) $payment['reference_number'], 'GQ-') === 0
+                    && (empty($payment['proof_image_path']) || trim((string) $payment['payer_reference']) === '')
                 )
             ) {
                 $db->rollback();
@@ -1030,6 +1089,29 @@ class Gymmate_model extends Model
             $db->rollback();
             throw $exception;
         }
+    }
+
+    public function get_admin_payment_proof_path($paymentId)
+    {
+        $payment = $this->row(
+            'SELECT proof_image_path FROM membership_payments WHERE payment_id = ? LIMIT 1',
+            [$paymentId]
+        );
+        return $payment['proof_image_path'] ?? null;
+    }
+
+    public function get_membership_payment_notification($paymentId)
+    {
+        return $this->row(
+            'SELECT u.full_name, u.email, p.plan_name, mp.amount,
+                    mp.payment_status, mp.reference_number
+             FROM membership_payments mp
+             INNER JOIN memberships m ON m.membership_id = mp.membership_id
+             INNER JOIN membership_plans p ON p.plan_id = m.plan_id
+             INNER JOIN users u ON u.user_id = m.user_id
+             WHERE mp.payment_id = ? AND mp.payment_status IN (?, ?) LIMIT 1',
+            [$paymentId, 'Verified', 'Rejected']
+        );
     }
 
     public function review_trainer_request($requestId, $status, $trainerUserId)

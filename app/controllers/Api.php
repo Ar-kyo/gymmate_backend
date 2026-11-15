@@ -5,7 +5,7 @@ class Api extends Controller
 {
     public function before_action()
     {
-        load_class('Security_headers', 'kernel')->apply_api();
+        load_class('Security_headers', 'kernel')->apply_api()->api_guard();
         header('Content-Type: application/json; charset=utf-8');
     }
 
@@ -608,7 +608,59 @@ class Api extends Controller
         )) {
             $this->respond(['error' => 'This payment is no longer pending. Refresh the dashboard before reviewing it.'], 409);
         }
-        $this->respond(['message' => 'Membership payment ' . strtolower($status) . '.']);
+        $emailSent = false;
+        try {
+            $notification = $this->Gymmate_model->get_membership_payment_notification((int) $paymentId);
+            if (!$notification) {
+                throw new RuntimeException('The reviewed payment notification details could not be loaded.');
+            }
+            $this->call->library('GymmateMailer');
+            $emailSent = $this->GymmateMailer->send_payment_status(
+                $notification['full_name'],
+                $notification['email'],
+                $notification['plan_name'],
+                $notification['amount'],
+                $status,
+                $notification['reference_number']
+            );
+        } catch (Throwable $exception) {
+            $this->log_mail_failure('Membership payment status email', $exception);
+        }
+        $this->respond([
+            'message' => 'Membership payment ' . strtolower($status) . '.',
+            'email_sent' => $emailSent,
+        ]);
+    }
+
+    public function admin_payment_proof()
+    {
+        $this->require_role('admin');
+        $paymentId = filter_var($_GET['payment_id'] ?? null, FILTER_VALIDATE_INT);
+        if (!$paymentId) {
+            $this->respond(['error' => 'A valid payment is required.'], 422);
+        }
+
+        $this->call->model('Gymmate_model');
+        $relativePath = $this->Gymmate_model->get_admin_payment_proof_path((int) $paymentId);
+        $path = $relativePath ? $this->resolve_payment_proof_path($relativePath) : null;
+        if (!$path || !is_file($path) || !is_readable($path)) {
+            $this->respond(['error' => 'The payment receipt was not found.'], 404);
+        }
+
+        $mime = (new finfo(FILEINFO_MIME_TYPE))->file($path);
+        if (!in_array($mime, ['image/jpeg', 'image/png', 'image/webp'], true)) {
+            error_log('[GymMate payment proof] Stored receipt has an unsupported image type.');
+            $this->respond(['error' => 'The stored payment receipt could not be displayed.'], 500);
+        }
+
+        header_remove('Content-Type');
+        header('Content-Type: ' . $mime);
+        header('Content-Length: ' . (string) filesize($path));
+        header('Content-Disposition: inline; filename="payment-receipt"');
+        header('Cache-Control: private, no-store');
+        header('X-Content-Type-Options: nosniff');
+        readfile($path);
+        exit;
     }
 
     public function trainer_review_request()
@@ -763,35 +815,93 @@ class Api extends Controller
             $this->respond(['error' => 'Choose a valid membership plan.'], 422);
         }
 
-        $this->call->library('PayMongo');
-        if (!$this->PayMongo->is_configured()) {
-            $this->respond([
-                'error' => 'GCash checkout is not configured. Add your PayMongo test keys and webhook signing secret to the private .env file.',
-            ], 503);
-        }
         $this->call->model('Gymmate_model');
         $plan = $this->Gymmate_model->find_active_plan($planId);
         if (!$plan) {
             $this->respond(['error' => 'That membership plan is no longer available.'], 404);
         }
-        $reference = 'GM-' . bin2hex(random_bytes(16));
-        $membershipId = $this->Gymmate_model->create_membership_payment(
+        $reference = 'GQ-' . bin2hex(random_bytes(16));
+        $payment = $this->Gymmate_model->create_membership_payment(
             (int) $user['user_id'],
             $plan,
             'GCash',
             $reference
         );
-        try {
-            $checkout = $this->PayMongo->create_checkout_session($plan, $membershipId, $reference);
-        } catch (Throwable $exception) {
-            $this->Gymmate_model->mark_membership_checkout_failed($membershipId, (int) $user['user_id']);
-            error_log('[GymMate PayMongo] Could not start membership checkout.');
-            $this->respond(['error' => $exception->getMessage()], 503);
-        }
         $this->respond([
-            'message' => 'Continue to PayMongo to pay securely with GCash.',
-            'checkout_url' => $checkout['checkout_url'],
+            'message' => 'Your GCash payment request is ready. Scan the QR code, then submit your transfer reference and receipt for admin review.',
+            'payment_id' => $payment['payment_id'],
+            'reference_number' => $reference,
+            'amount' => $plan['price'],
         ], 201);
+    }
+
+    public function submit_membership_payment_proof()
+    {
+        $member = $this->require_role('member');
+        $paymentId = filter_var($_POST['payment_id'] ?? null, FILTER_VALIDATE_INT);
+        $payerReference = trim((string) ($_POST['payer_reference'] ?? ''));
+        if (!$paymentId || $payerReference === '' || strlen($payerReference) > 100) {
+            $this->respond(['error' => 'Enter a valid GCash transaction reference.'], 422);
+        }
+
+        $file = $_FILES['receipt'] ?? null;
+        if (!is_array($file) || !isset($file['error'], $file['tmp_name'], $file['size'])) {
+            $this->respond(['error' => 'Upload a screenshot of your payment receipt.'], 422);
+        }
+        if ((int) $file['error'] !== UPLOAD_ERR_OK) {
+            $status = in_array((int) $file['error'], [UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE], true) ? 413 : 422;
+            $this->respond([
+                'error' => $status === 413
+                    ? 'The receipt image must be 5 MB or smaller.'
+                    : 'The receipt image could not be uploaded. Choose an image and try again.',
+            ], $status);
+        }
+        if ((int) $file['size'] < 1 || (int) $file['size'] > 5 * 1024 * 1024 || !is_uploaded_file($file['tmp_name'])) {
+            $this->respond(['error' => 'Choose a valid receipt image of 5 MB or smaller.'], 422);
+        }
+
+        $finfo = new finfo(FILEINFO_MIME_TYPE);
+        $mime = $finfo->file($file['tmp_name']);
+        $extensions = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp'];
+        $image = @getimagesize($file['tmp_name']);
+        if (!isset($extensions[$mime]) || !$image || ($image['mime'] ?? '') !== $mime) {
+            $this->respond(['error' => 'Receipt must be a valid JPG, PNG, or WebP image.'], 422);
+        }
+
+        $directory = $this->payment_proof_directory();
+        $filename = bin2hex(random_bytes(16)) . '.' . $extensions[$mime];
+        $absolutePath = $directory . DIRECTORY_SEPARATOR . $filename;
+        if (!move_uploaded_file($file['tmp_name'], $absolutePath)) {
+            error_log('[GymMate payment proof] Could not store an uploaded receipt.');
+            $this->respond(['error' => 'The receipt could not be saved. Please try again.'], 500);
+        }
+
+        $relativePath = 'runtime/payment-proofs/' . $filename;
+        try {
+            $this->call->model('Gymmate_model');
+            $previousPath = $this->Gymmate_model->submit_gcash_payment_proof(
+                (int) $paymentId,
+                (int) $member['user_id'],
+                $payerReference,
+                $relativePath
+            );
+        } catch (Throwable $exception) {
+            if (is_file($absolutePath) && !@unlink($absolutePath)) {
+                error_log('[GymMate payment proof] Could not remove an unclaimed receipt after a database error.');
+            }
+            throw $exception;
+        }
+        if ($previousPath === false) {
+            if (is_file($absolutePath) && !@unlink($absolutePath)) {
+                error_log('[GymMate payment proof] Could not remove an unclaimed receipt.');
+            }
+            $this->respond(['error' => 'This payment is not available for receipt submission. Refresh your dashboard and try again.'], 409);
+        }
+        if (is_string($previousPath) && $previousPath !== '') {
+            $this->delete_payment_proof($previousPath);
+        }
+
+        $this->respond(['message' => 'Your receipt was submitted. An administrator will review your payment and email you the decision.']);
     }
 
     public function request_trainer()
@@ -905,6 +1015,47 @@ class Api extends Controller
         $message = substr(preg_replace('/[\r\n\t]+/', ' ', (string) $message), 0, 500);
 
         error_log(sprintf('[GymMate mail] %s delivery failed: %s', $operation, $message));
+    }
+
+    private function payment_proof_directory()
+    {
+        $directory = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'runtime'
+            . DIRECTORY_SEPARATOR . 'payment-proofs';
+        if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+            error_log('[GymMate payment proof] The private receipt directory could not be created.');
+            $this->respond(['error' => 'Receipt uploads are temporarily unavailable. Please contact the gym.'], 503);
+        }
+        if (!is_writable($directory)) {
+            error_log('[GymMate payment proof] The private receipt directory is not writable.');
+            $this->respond(['error' => 'Receipt uploads are temporarily unavailable. Please contact the gym.'], 503);
+        }
+        return $directory;
+    }
+
+    private function resolve_payment_proof_path(string $relativePath)
+    {
+        if (!preg_match('#\Aruntime/payment-proofs/[a-f0-9]{32}\.(?:jpg|png|webp)\z#D', $relativePath)) {
+            return null;
+        }
+
+        $root = realpath(dirname(__DIR__, 2));
+        if (!$root) {
+            return null;
+        }
+        $directory = realpath($root . DIRECTORY_SEPARATOR . 'runtime' . DIRECTORY_SEPARATOR . 'payment-proofs');
+        $path = realpath($root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath));
+        if (!$directory || !$path || strpos($path, $directory . DIRECTORY_SEPARATOR) !== 0) {
+            return null;
+        }
+        return $path;
+    }
+
+    private function delete_payment_proof(string $relativePath)
+    {
+        $path = $this->resolve_payment_proof_path($relativePath);
+        if ($path && is_file($path) && !@unlink($path)) {
+            error_log('[GymMate payment proof] A replaced receipt could not be removed.');
+        }
     }
 
     private function respond(array $payload, $status = 200)

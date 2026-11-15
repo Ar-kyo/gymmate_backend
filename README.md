@@ -22,6 +22,18 @@ Verify the sender domain in Resend before sending. Do not commit the API key. Th
 
 ---
 
+## GCash membership payments
+
+Membership checkout creates a pending GCash QR payment. Members scan the QR, then submit their GCash transaction reference and receipt image. Admins can view the private receipt, approve or reject the payment, and GymMate activates the membership only after approval. Orders without submitted evidence remain pending and cannot be approved. The QR image is served from `gymmate_frontend-main/public/gcash-qr.jpg`; replace it only with the business's verified receiving QR.
+
+Apply `database/migrations/002_gcash_manual_payment_review.sql` once after the existing GymMate schema. The backend health endpoint reports the migration's missing payment columns until it is applied. Receipt images are stored outside the public web root in `runtime/payment-proofs` and are viewable only by an authenticated administrator.
+
+After an admin decision, GymMate sends an email to the member's registered email address (including Gmail addresses) through the configured Resend API. Configure `RESEND_API_KEY`, `MAIL_FROM_ADDRESS`, and `MAIL_FROM_NAME` in the private root `.env`; verify the sender address/domain with Resend. If sending fails, the admin response reports that the status email was not sent, and the backend logs the failure.
+
+PayMongo webhook routes remain only for any old checkout sessions created before this change. New membership requests do not start PayMongo checkouts.
+
+---
+
 ## Overview
 
 **LavaLust** is an open-source PHP framework that follows the **MVC (Model–View–Controller)** architectural pattern. It is designed for developers who need a structured, maintainable, and scalable foundation — without the bloat of heavier modern frameworks.

@@ -399,7 +399,7 @@ $config['security_headers'] = [
     'coop'               => 'same-origin',
 
     // ── API ──
-    'api_max_body' => 1048576,
+    'api_max_body' => 6291456,
     'cors' => [
         'allowed_origins' => array_values(array_unique(array_filter(array_map(
             function ($origin) {

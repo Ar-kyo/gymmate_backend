@@ -90,6 +90,41 @@ class GymmateMailer
         return $this->send_email($recipientEmail, 'Welcome to GymMate', $html, $text);
     }
 
+    public function send_payment_status(
+        string $recipientName,
+        string $recipientEmail,
+        string $planName,
+        $amount,
+        string $status,
+        string $reference
+    ): bool {
+        if (!in_array($status, ['Verified', 'Rejected'], true)) {
+            throw new InvalidArgumentException('A valid membership payment status is required.');
+        }
+        if (!filter_var($recipientEmail, FILTER_VALIDATE_EMAIL)) {
+            throw new RuntimeException('A valid recipient email address is required.');
+        }
+
+        $approved = $status === 'Verified';
+        $subject = $approved ? 'Your GymMate membership payment is approved' : 'Your GymMate membership payment was rejected';
+        $decision = $approved
+            ? 'Your payment has been approved, and your membership is now active.'
+            : 'Your payment was not approved. Please contact GymMate if you think this was a mistake.';
+        $safeName = htmlspecialchars($recipientName, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $safePlan = htmlspecialchars($planName, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $safeReference = htmlspecialchars($reference, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $formattedAmount = 'PHP ' . number_format((float) $amount, 2);
+        $text = "Hi {$recipientName},\n\n{$decision}\n\n"
+            . "Plan: {$planName}\nAmount: {$formattedAmount}\nGymMate order reference: {$reference}\n\nGymMate";
+        $html = '<!doctype html><html><body style="font-family:Arial,sans-serif;color:#20231c">'
+            . '<h1>' . ($approved ? 'Payment approved' : 'Payment rejected') . '</h1>'
+            . '<p>Hi ' . $safeName . ',</p><p>' . htmlspecialchars($decision, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</p>'
+            . '<p><strong>Plan:</strong> ' . $safePlan . '<br><strong>Amount:</strong> ' . $formattedAmount
+            . '<br><strong>GymMate order reference:</strong> ' . $safeReference . '</p><p>GymMate</p></body></html>';
+
+        return $this->send_email($recipientEmail, $subject, $html, $text);
+    }
+
     public function send_contact(string $recipientEmail, string $senderName, string $senderEmail, string $message): bool
     {
         if (!filter_var($recipientEmail, FILTER_VALIDATE_EMAIL) || !filter_var($senderEmail, FILTER_VALIDATE_EMAIL)) {
