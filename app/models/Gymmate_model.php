@@ -107,6 +107,8 @@ class Gymmate_model extends Model
             'trainer_schedules',
             'attendance_logs',
             'trainer_sessions',
+            'inbound_emails',
+            'inbound_email_replies',
         ];
         $placeholders = implode(', ', array_fill(0, count($requiredTables), '?'));
         $statement = $pdo->prepare(
@@ -959,6 +961,97 @@ class Gymmate_model extends Model
              ORDER BY (mp.payment_status = ?) DESC, mp.payment_id DESC',
             ['Pending']
         );
+    }
+
+    public function create_inbound_email(array $email)
+    {
+        return $this->connection()->raw(
+            'INSERT INTO inbound_emails
+                (resend_email_id, message_id, sender_email, sender_name,
+                 recipient_addresses, subject, body_text, received_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE resend_email_id = VALUES(resend_email_id)',
+            [
+                $email['resend_email_id'],
+                $email['message_id'],
+                $email['sender_email'],
+                $email['sender_name'],
+                $email['recipient_addresses'],
+                $email['subject'],
+                $email['body_text'],
+                $email['received_at'],
+            ]
+        );
+    }
+
+    public function get_admin_inbound_emails()
+    {
+        return $this->rows(
+            'SELECT inbound_email_id, sender_email, sender_name, subject,
+                    LEFT(body_text, 280) AS preview, received_at, read_at
+             FROM inbound_emails ORDER BY received_at DESC, inbound_email_id DESC LIMIT 100'
+        );
+    }
+
+    public function get_admin_inbound_email($inboundEmailId)
+    {
+        return $this->row(
+            'SELECT inbound_email_id, resend_email_id, message_id,
+                    sender_email, sender_name, recipient_addresses,
+                    subject, body_text, received_at, read_at
+             FROM inbound_emails WHERE inbound_email_id = ? LIMIT 1',
+            [$inboundEmailId]
+        );
+    }
+
+    public function get_admin_inbound_replies($inboundEmailId)
+    {
+        return $this->rows(
+            'SELECT r.reply_id, r.body_text, r.sent_at, u.full_name AS admin_name
+             FROM inbound_email_replies r
+             INNER JOIN users u ON u.user_id = r.admin_user_id
+             WHERE r.inbound_email_id = ? ORDER BY r.sent_at ASC, r.reply_id ASC',
+            [$inboundEmailId]
+        );
+    }
+
+    public function mark_inbound_email_read($inboundEmailId)
+    {
+        $this->connection()->raw(
+            'UPDATE inbound_emails SET read_at = COALESCE(read_at, NOW()) WHERE inbound_email_id = ?',
+            [$inboundEmailId]
+        );
+    }
+
+    public function save_admin_inbound_reply($inboundEmailId, $adminUserId, $body, $resendEmailId)
+    {
+        $db = $this->connection();
+        $db->transaction();
+        try {
+            $email = $this->row(
+                'SELECT inbound_email_id FROM inbound_emails WHERE inbound_email_id = ? FOR UPDATE',
+                [$inboundEmailId]
+            );
+            if (!$email) {
+                $db->rollback();
+                return false;
+            }
+            $db->raw(
+                'INSERT INTO inbound_email_replies
+                    (inbound_email_id, admin_user_id, body_text, resend_email_id)
+                 VALUES (?, ?, ?, ?)',
+                [$inboundEmailId, $adminUserId, $body, $resendEmailId]
+            );
+            $db->raw(
+                'UPDATE inbound_emails SET read_at = COALESCE(read_at, NOW()) WHERE inbound_email_id = ?',
+                [$inboundEmailId]
+            );
+            $db->commit();
+            return true;
+        } catch (Throwable $exception) {
+            $db->rollback();
+            throw $exception;
+        }
     }
 
     public function get_admin_trainer_requests()

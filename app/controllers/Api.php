@@ -31,12 +31,14 @@ class Api extends Controller
         try {
             $this->call->model('Gymmate_model');
             $this->call->library('PayMongo');
+            $this->call->library('ResendInbound');
             $database = $this->Gymmate_model->check_database_connection();
             $this->respond([
                 'status' => $database['schema_ready'] ? 'ok' : 'setup_required',
                 'database' => $database,
                 'gcash_payment_configured' => $this->PayMongo->is_configured(),
                 'email_configured' => (bool) (getenv('RESEND_API_KEY') && getenv('MAIL_FROM_ADDRESS')),
+                'inbound_email_configured' => $this->ResendInbound->is_configured(),
             ], $database['schema_ready'] ? 200 : 503);
         } catch (Throwable $exception) {
             error_log(sprintf(
@@ -48,6 +50,11 @@ class Api extends Controller
                 'status' => 'database_unavailable',
                 'database' => ['connected' => false],
                 'email_configured' => (bool) (getenv('RESEND_API_KEY') && getenv('MAIL_FROM_ADDRESS')),
+                'inbound_email_configured' => (bool) (
+                    getenv('RESEND_API_KEY')
+                    && getenv('RESEND_RECEIVING_ADDRESS')
+                    && getenv('RESEND_RECEIVING_WEBHOOK_SECRET')
+                ),
             ], 503);
         }
     }
@@ -207,6 +214,7 @@ class Api extends Controller
         $data['stats'] = $this->Gymmate_model->get_admin_stats();
         $data['users'] = $this->Gymmate_model->get_admin_users();
         $data['payments'] = $this->Gymmate_model->get_admin_payments();
+        $data['inbound_emails'] = $this->Gymmate_model->get_admin_inbound_emails();
         $data['trainer_requests'] = $this->Gymmate_model->get_admin_trainer_requests();
         $data['attendance'] = $this->Gymmate_model->get_admin_recent_attendance();
         $this->respond($data);
@@ -365,6 +373,162 @@ class Api extends Controller
             $this->respond(['error' => 'The paid transaction did not match a pending membership.'], 422);
         }
         $this->respond(['received' => true]);
+    }
+
+    public function resend_inbound_webhook()
+    {
+        $signatureId = (string) ($_SERVER['HTTP_SVIX_ID'] ?? '');
+        $timestamp = (string) ($_SERVER['HTTP_SVIX_TIMESTAMP'] ?? '');
+        $signature = (string) ($_SERVER['HTTP_SVIX_SIGNATURE'] ?? '');
+        if (function_exists('getallheaders')) {
+            foreach (getallheaders() as $name => $value) {
+                if (strcasecmp($name, 'svix-id') === 0) {
+                    $signatureId = (string) $value;
+                } elseif (strcasecmp($name, 'svix-timestamp') === 0) {
+                    $timestamp = (string) $value;
+                } elseif (strcasecmp($name, 'svix-signature') === 0) {
+                    $signature = (string) $value;
+                }
+            }
+        }
+
+        $rawBody = (string) file_get_contents('php://input');
+        $this->call->library('ResendInbound');
+        $event = $this->ResendInbound->verify_webhook($rawBody, $signatureId, $timestamp, $signature);
+        if (!$event) {
+            $this->respond(['error' => 'Invalid Resend inbound email webhook signature.'], 400);
+        }
+        if (($event['type'] ?? '') !== 'email.received') {
+            $this->respond(['received' => true]);
+        }
+
+        $metadata = $event['data'] ?? null;
+        $emailId = is_array($metadata) ? (string) ($metadata['email_id'] ?? '') : '';
+        if ($emailId === '') {
+            error_log('[GymMate Resend inbound] Signed email.received event is missing its email ID.');
+            $this->respond(['error' => 'The received email could not be identified.'], 422);
+        }
+
+        try {
+            $email = $this->ResendInbound->get_received_email($emailId);
+        } catch (Throwable $exception) {
+            error_log('[GymMate Resend inbound] Could not fetch the signed received email: ' . $exception->getMessage());
+            $this->respond(['error' => 'The received email could not be retrieved.'], 503);
+        }
+
+        $sender = $this->parse_email_sender((string) ($email['from'] ?? $metadata['from'] ?? ''));
+        if (!$sender) {
+            error_log('[GymMate Resend inbound] Received email is missing a valid sender address.');
+            $this->respond(['error' => 'The received email has an invalid sender address.'], 422);
+        }
+        $recipients = $email['received_for'] ?? $metadata['received_for'] ?? $email['to'] ?? $metadata['to'] ?? [];
+        if (!is_array($recipients)) {
+            $recipients = [];
+        }
+        $recipients = array_values(array_filter($recipients, 'is_string'));
+        $messageId = (string) ($email['message_id'] ?? $metadata['message_id'] ?? '');
+        if ($messageId !== '' && (strlen($messageId) > 998 || preg_match('/[\r\n]/', $messageId))) {
+            $messageId = '';
+        }
+        $subject = trim((string) ($email['subject'] ?? $metadata['subject'] ?? ''));
+        $subject = preg_replace('/[\r\n\t]+/', ' ', $subject);
+        $subject = function_exists('mb_strcut')
+            ? mb_strcut($subject, 0, 998, 'UTF-8')
+            : substr($subject, 0, 998);
+        $body = is_string($email['text'] ?? null) ? $email['text'] : '';
+        if ($body === '' && is_string($email['html'] ?? null)) {
+            $html = preg_replace('#<\s*(br|/p|/div|/li|/tr|/h[1-6])\b[^>]*>#i', "\n", $email['html']);
+            $body = html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        }
+        if (strlen($body) > 1000000) {
+            $body = function_exists('mb_strcut')
+                ? mb_strcut($body, 0, 1000000, 'UTF-8')
+                : substr($body, 0, 1000000);
+        }
+        try {
+            $receivedAt = new DateTime((string) ($metadata['created_at'] ?? $event['created_at'] ?? 'now'));
+        } catch (Throwable $exception) {
+            $this->respond(['error' => 'The received email has an invalid timestamp.'], 422);
+        }
+        $receivedAt->setTimezone(new DateTimeZone('Asia/Manila'));
+
+        $this->call->model('Gymmate_model');
+        $this->Gymmate_model->create_inbound_email([
+            'resend_email_id' => $emailId,
+            'message_id' => $messageId !== '' ? $messageId : null,
+            'sender_email' => $sender['email'],
+            'sender_name' => $sender['name'],
+            'recipient_addresses' => json_encode($recipients, JSON_THROW_ON_ERROR),
+            'subject' => $subject,
+            'body_text' => $body,
+            'received_at' => $receivedAt->format('Y-m-d H:i:s'),
+        ]);
+        $this->respond(['received' => true]);
+    }
+
+    public function admin_inbox_thread()
+    {
+        $this->require_role('admin');
+        $inboundEmailId = filter_var($_GET['inbound_email_id'] ?? null, FILTER_VALIDATE_INT);
+        if (!$inboundEmailId) {
+            $this->respond(['error' => 'A valid inbound email is required.'], 422);
+        }
+
+        $this->call->model('Gymmate_model');
+        $email = $this->Gymmate_model->get_admin_inbound_email((int) $inboundEmailId);
+        if (!$email) {
+            $this->respond(['error' => 'This inbound email was not found.'], 404);
+        }
+        $this->Gymmate_model->mark_inbound_email_read((int) $inboundEmailId);
+        $email['replies'] = $this->Gymmate_model->get_admin_inbound_replies((int) $inboundEmailId);
+        $this->respond(['email' => $email]);
+    }
+
+    public function admin_inbox_reply()
+    {
+        $admin = $this->require_role('admin');
+        $inboundEmailId = filter_var($_POST['inbound_email_id'] ?? null, FILTER_VALIDATE_INT);
+        $body = trim((string) ($_POST['body'] ?? ''));
+        if (!$inboundEmailId || $body === '' || strlen($body) > 5000) {
+            $this->respond(['error' => 'Enter a reply of 1 to 5000 characters.'], 422);
+        }
+
+        $this->call->model('Gymmate_model');
+        $email = $this->Gymmate_model->get_admin_inbound_email((int) $inboundEmailId);
+        if (!$email) {
+            $this->respond(['error' => 'This inbound email was not found.'], 404);
+        }
+        if (!$email['message_id']) {
+            $this->respond(['error' => 'This email cannot be replied to in a thread. Contact the sender directly.'], 422);
+        }
+        try {
+            $this->call->library('GymmateMailer');
+            $resendEmailId = $this->GymmateMailer->send_inbound_reply(
+                $email['sender_email'],
+                $email['subject'],
+                $body,
+                $email['message_id']
+            );
+        } catch (Throwable $exception) {
+            $this->log_mail_failure('Inbound email reply', $exception);
+            $this->respond(['error' => 'The reply could not be sent. Check Resend configuration and try again.'], 503);
+        }
+
+        try {
+            $saved = $this->Gymmate_model->save_admin_inbound_reply(
+                (int) $inboundEmailId,
+                (int) $admin['user_id'],
+                $body,
+                $resendEmailId
+            );
+        } catch (Throwable $exception) {
+            error_log('[GymMate inbound email] A reply was sent but its thread history could not be saved: ' . $exception->getMessage());
+            $this->respond(['error' => 'The reply was sent, but its history could not be saved. Refresh the inbox before sending again.'], 500);
+        }
+        if (!$saved) {
+            $this->respond(['error' => 'The reply was sent, but its thread history could not be saved. Refresh the inbox before sending again.'], 500);
+        }
+        $this->respond(['message' => 'Your reply was sent.']);
     }
 
     public function trainer_save_schedule()
@@ -990,6 +1154,28 @@ class Api extends Controller
         $today = new DateTime('today');
         $latest = (clone $today)->modify('+90 days');
         return $parsed >= $today && $parsed <= $latest;
+    }
+
+    private function parse_email_sender(string $value): ?array
+    {
+        $value = trim($value);
+        $email = $value;
+        $name = '';
+        if (preg_match('/^(.*?)<([^<>]+)>$/', $value, $matches)) {
+            $name = trim($matches[1], " \t\n\r\0\x0B\"'");
+            $email = trim($matches[2]);
+        }
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            return null;
+        }
+
+        $name = preg_replace('/[\r\n\t]+/', ' ', $name);
+        return [
+            'email' => $email,
+            'name' => $name !== ''
+                ? (function_exists('mb_strcut') ? mb_strcut($name, 0, 255, 'UTF-8') : substr($name, 0, 255))
+                : null,
+        ];
     }
 
     private function log_mail_failure(string $operation, Throwable $exception)

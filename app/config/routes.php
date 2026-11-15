@@ -58,6 +58,9 @@ $router->post('/api/member/membership-payment-proof', 'Api::submit_membership_pa
 $router->get('/api/memberships/payment-status', 'Api::payment_status');
 $router->get('/api/admin/membership-payments/proof', 'Api::admin_payment_proof');
 $router->post('/api/payments/paymongo-webhook', 'Api::paymongo_webhook');
+$router->post('/api/email/resend-inbound-webhook', 'Api::resend_inbound_webhook');
+$router->get('/api/admin/inbox/thread', 'Api::admin_inbox_thread');
+$router->post('/api/admin/inbox/reply', 'Api::admin_inbox_reply');
 $router->post('/api/trainer-requests', 'Api::request_trainer');
 $router->post('/api/admin/users', 'Api::admin_create_user');
 $router->post('/api/admin/users/role', 'Api::admin_change_role');
