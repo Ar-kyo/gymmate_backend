@@ -32,6 +32,10 @@ After an admin decision, GymMate sends an email to the member's registered email
 
 PayMongo webhook routes remain only for any old checkout sessions created before this change. New membership requests do not start PayMongo checkouts.
 
+## Session security
+
+The production Docker image disables PHP session upload-progress tracking because GymMate does not use it. Deploy the updated image for this setting to take effect; the PHP session-security notice in older Render logs should then stop appearing.
+
 ## Optional Resend inbound email API
 
 The backend has optional endpoints and storage for inbound messages from Resend. The admin inbox interface is not currently included in the frontend. Apply `database/migrations/003_resend_inbound_email_inbox.sql` after the existing GymMate schema and migrations `001` and `002` only if you intend to use these endpoints. The backend health endpoint reports whether the required schema is ready.

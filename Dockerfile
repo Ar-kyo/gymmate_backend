@@ -10,6 +10,9 @@ FROM php:${PHP_VERSION}-apache
 # Install PDO MySQL
 RUN docker-php-ext-install pdo pdo_mysql
 
+# Disable PHP session upload tracking; application sessions do not use it.
+RUN printf '%s\n' 'session.upload_progress.enabled=0' > /usr/local/etc/php/conf.d/zz-gymmate-security.ini
+
 # Enable Apache mod_rewrite
 RUN a2enmod rewrite
 
