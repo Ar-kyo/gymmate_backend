@@ -32,9 +32,9 @@ After an admin decision, GymMate sends an email to the member's registered email
 
 PayMongo webhook routes remain only for any old checkout sessions created before this change. New membership requests do not start PayMongo checkouts.
 
-## Resend inbox and replies
+## Optional Resend inbound email API
 
-The admin dashboard includes an inbox for messages received through Resend and replies to GymMate emails. Apply `database/migrations/003_resend_inbound_email_inbox.sql` after the existing GymMate schema and migrations `001` and `002`. The backend health endpoint reports whether the required schema is ready.
+The backend has optional endpoints and storage for inbound messages from Resend. The admin inbox interface is not currently included in the frontend. Apply `database/migrations/003_resend_inbound_email_inbox.sql` after the existing GymMate schema and migrations `001` and `002` only if you intend to use these endpoints. The backend health endpoint reports whether the required schema is ready.
 
 In Resend, configure an inbound receiving address and create a webhook subscribed to `email.received`. Point it to the public backend URL `https://YOUR-BACKEND-HOST/api/email/resend-inbound-webhook` and copy the webhook signing secret into the backend's private `.env`:
 
@@ -46,7 +46,7 @@ RESEND_RECEIVING_WEBHOOK_SECRET=whsec_...
 
 Set `RESEND_RECEIVING_ADDRESS` to the actual address configured for receiving; it is also used as the Reply-To address on GymMate emails so customers can reply directly. Configure the receiving domain and its MX records in Resend. If the domain already receives mail elsewhere (for example, Google Workspace), use a dedicated receiving subdomain or carefully coordinate MX changes to avoid interrupting existing mail.
 
-The webhook verifies Resend's Svix signature before retrieving and storing the message. Duplicate webhook deliveries are idempotent. Admins can read the message and send a threaded reply from the dashboard. Message bodies are displayed as text; inbound attachments are not downloaded or stored. The health endpoint's `inbound_email_configured` flag reports whether the API key, receiving address, and webhook secret are present; it does not confirm that DNS or provider delivery is working.
+The webhook verifies Resend's Svix signature before retrieving and storing the message. Duplicate webhook deliveries are idempotent. Message bodies are stored as text; inbound attachments are not downloaded or stored. The health endpoint's `inbound_email_configured` flag reports whether the API key, receiving address, and webhook secret are present; it does not confirm that DNS or provider delivery is working.
 
 ---
 
